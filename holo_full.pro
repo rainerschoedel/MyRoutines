@@ -343,7 +343,7 @@ for ic = 0, ncubes-1 do begin
       P = [1.,0.,0.]
       W = model
       gt0 = where(model gt 0,complement=lt0)
-      W[gt0] = sqrt(W[gt0])
+      W[gt0] = 1.0; sqrt(W[gt0])
       W[lt0] = 0
       res = mpcurvefit(model,im,W,P,sigma,FUNCTION_NAME='CALEVAL',/NODERIVATIVE,/QUIET)
 ;      print, 'Model fitting parameters for overall image: ' + strn(P)
