@@ -342,8 +342,9 @@ for ic = 0, ncubes-1 do begin
       model = model * thisfov
       P = [1.,0.,0.]
       W = model
-      gt0 = where(model gt 0,complement=lt0)
-      W[gt0] = 1.0; sqrt(W[gt0])
+      gt0 = where(thisfov gt 0,complement=lt0)
+;      W[gt0] = sqrt(W[gt0])
+      W[gt0] = 1.0
       W[lt0] = 0
       res = mpcurvefit(model,im,W,P,sigma,FUNCTION_NAME='CALEVAL',/NODERIVATIVE,/QUIET)
 ;      print, 'Model fitting parameters for overall image: ' + strn(P)
@@ -366,7 +367,7 @@ for ic = 0, ncubes-1 do begin
       if (debug gt 0) then begin
          print, P
          writefits, tmpdir + 'noise.fits', im_noise
-        writefits, tmpdir + 'model.fits', model
+        writefits, tmpdir + 'model.fits', im_model
         writefits, tmpdir + 'W.fits', W
       endif
 
@@ -377,7 +378,8 @@ for ic = 0, ncubes-1 do begin
       for iref = 0, nref_accept - 1 do begin
        sub_arrays, background, xint_accept[iref], yint_accept[iref], boxsize, thisbg, masks
        sub_arrays, im, xint_accept[iref], yint_accept[iref], boxsize, slice, masks
-       slice = slice - thisbg
+       if debug then writefits, tmpdir + 'slice_raw.fits', slice
+;       slice = slice - thisbg
        sub_arrays, thisfov, xint_accept[iref], yint_accept[iref], boxsize, maskslice, masks
        psfmasks[*,*,iref] = maskslice * masks
        distances = sqrt((xx-x_psf_accept[iref])^2 + (yy-y_psf_accept[iref])^2)
@@ -396,7 +398,7 @@ for ic = 0, ncubes-1 do begin
          if (other_stars[0] gt -1) then begin
            secondaries = image_model(x_near[other_stars],y_near[other_stars],f_near[other_stars],boxsize,boxsize,psf,REFERENCE_PIX=[boxhw,boxhw])
           
-           slice = slice - (background + image_shift(secondaries*P[0],P[1],P[2]))
+           slice = slice - (thisbg + image_shift(secondaries*P[0],P[1],P[2]))
 ;         print, 'P[0]: ' + strn(P[0])
          ; subtraction of secondary sources will not be perfect
          ; to further suppress there influence
@@ -423,7 +425,8 @@ for ic = 0, ncubes-1 do begin
 ;          if debug then begin
 ;             print, 'Number of nearby stars: ' + strn(n_elements(nearby))
 ;             writefits, tmpdir + 'slice.fits', slice
-;             writefits, tmpdir + 'secondaries.fits', secondaries
+;             writefits, tmpdir + 'secondaries.fits',  image_shift(secondaries*P[0],P[1],P[2])
+;             writefits, tmpdir + 'background.fits', thisbg
 ;             STOP
 ;          endif
         endif        ;  if (nearby[0] gt -1)
@@ -592,10 +595,14 @@ for ic = 0, ncubes-1 do begin
     endfor                         ; end loop over frames in this cube (nim)
 
     endif else begin ;   if (nref_accept gt 0) and (nim ge nsub) then begin
+       print, '--------------' 
+       print, '***WARNING***' 
        print, "Cube number: " + string(ic+1) + " no reference stars detected or "
        print, 'Too few frames in this cube:. There are ' + strn(nim) + ' frames, but'
-       print, strn(nsub) + ' are required for jackknife sampleing.'
-       STOP
+       print, strn(nsub) + ' are required for jackknife sampling.'
+       print, 'Skipping cube ' + list[ic] + '.'
+       print, "--------------" 
+;       STOP
     endelse
   
 
