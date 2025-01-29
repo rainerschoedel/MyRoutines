@@ -1,0 +1,662 @@
+PRO CALEVAL, X, P, YMOD
+
+  YMOD = P[0]*X
+  YMOD = image_shift(YMOD,P[1],P[2])
+
+END
+
+
+;---------------------
+
+PRO COADD_HERVE, indir, inlist, outnam,  maskrad, normrad, nsigma, rebfac, refsources, starlist, maskdir=maskdir, masklist=masklist, DEBUG = debug, iter=iter, AIRY=airy, OUT_ITER=out_iter, PSFOUT = psfout, UNWEIGHTED = unweighted, SUBPIX=subpix, tmpdir=tmpdir, BOXHW=box_hwidth, NSUB=nsub, MINSUPP=minsupp, MAXSUPP = maxsupp,   REBITER=rebiter, RAWOUT = rawout, N_MASK_SECONDARY=n_mask_secondary, PSF_FRAC = psf_frac, CORRECT_SKY = correct_sky, SMOOTHMASK = smoothmask, N_REF_MAX = n_ref_max, PR = pr, CIRC_BORDER=circ_border, SATLEVEL=satlevel, PSF_BORDER=psf_border, ESTIM_BG = estim_bg, SAT_MASK = sat_mask, contrast_thresh = contrast_thresh, WIEN_WEIGHT=wien_weight
+
+; ---------------------------------------------------
+; NOTE: cubes with less than nsub frames will be discarded
+; ---------------------------------------------------
+
+if (not KEYWORD_SET(debug)) then debug = 0
+if (not KEYWORD_SET(maxsupp)) then maxsupp = 1.1
+if (not KEYWORD_SET(minsupp)) then minsupp = 0.9
+if (not KEYWORD_SET(n_mask_secondary)) then n_mask_secondary = 0
+if (not KEYWORD_SET(rawout)) then rawout= 0
+if (not KEYWORD_SET(rebiter)) then rebiter = 0
+if (not KEYWORD_SET(psf_frac)) then psf_frac = 0.9
+if (not KEYWORD_SET(correct_sky)) then correct_sky = 0
+if (not KEYWORD_SET(smoothmask)) then smoothmask = 0
+if (not KEYWORD_SET(pr)) then pr = 1
+if (not KEYWORD_SET(circ_border)) then circ_border = 0
+if (not KEYWORD_SET(satlevel)) then satlevel = 1.0e9
+if (not KEYWORD_SET(psf_border)) then psf_border = 0.0
+if (not KEYWORD_SET(estim_bg)) then estim_bg = 0
+if (not KEYWORD_SET(contrast_thresh)) then contrast_tresh = 0
+if (not KEYWORD_SET(wien_weight)) then wien_weight = 0
+
+
+; Identical to holo7sub.pro except that it 
+; subtracts the noise threshold from the final PSF
+; -------------------------------------------------
+
+ ; star list
+  readcol, starlist, xx, yy, ff
+ ; rebin positions if necessary
+ if (rebiter lt 1) then begin
+  xx = rebfac * xx
+  yy = rebfac * yy
+  ff = rebfac^2 * ff
+ endif
+
+; read list of input cubes
+readcol, inlist, list, FORMAT='A'
+ncubes = n_elements(list)
+print, 'input file list: ' 
+print, list
+print
+
+; read list of  FOV masks
+readcol, masklist, mlist, FORMAT='A'
+print
+print, 'mask list: ' 
+print, mlist
+print
+
+; For holo_herve, we must sort the
+; exposures into an appropriate order
+; and adapt the field masks
+mask_file = mlist[0]
+SORT_MASKS, maskdir, mask_file, mask_order
+
+im = readfits(indir + list[0], NSLICE=0)
+sz = size(im)
+nax1 = sz[1]
+nax2 = sz[2]
+
+; multiply with rebin factor
+satlev = satlevel/rebfac^2 ; variable must be changed
+                                ; otherwise satlevel is passed back
+                                ; with changed value, which will 
+                                ; create problems in repeated calls of
+                                ; this routine.
+maskrad = rebfac * maskrad
+nax1 = rebfac*nax1
+nax2 = rebfac*nax2
+normrad = rebfac*normrad
+boxhw = rebfac*box_hwidth ; change name of variable
+; pixel indixes for subarray extraction
+boxsize = long(2*boxhw + 1)
+
+; number of pixels in image
+;npix = float(nax1 * nax2)
+
+cen1 = nax1/2
+cen2 = nax2/2
+center = [cen1,cen2]
+
+dmax = rebfac * 2.0  ; contaminating  stars close to a reference stars will be
+                     ; recognized if they are located at more than dmax 
+                     ; from the reference star
+                     ; smaller dmax values can be dangerous because
+                     ; then a reference star may be considered a contaminator
+                     ; which would screw up the PSF extraction
+
+; dummy needed  ringmask for background estimation
+; npix_ref if the minimum required support region for
+; reference stars (in case of variable masking/dithering)
+dummy = fltarr(boxsize,boxsize)
+dummy[*,*] = 1
+bgring = circ_mask(dummy,boxhw,boxhw,maskrad, INNER=1)
+bgind = where(bgring gt 0, n_bgind)
+
+; SUPPORT FOR PSF, NOT IN PYTHON CODE
+dummy[*,*] = 1
+dummy = circ_mask(dummy,boxhw,boxhw,maskrad)
+psf_support = where(dummy gt 0, npix_ref)
+
+; ######################################
+
+; apodization with telescope OTF
+; be careful to provide an adequately sampled PSF 
+; of the correct size 
+; (re-binning of PSF can be done but is non-optimal)
+airy = airy/total(airy)
+APOD = FFT(airy)*(nax1*nax2)
+OTF = ABS(APOD)
+
+; reference sources
+x_psf = refsources[0,*]
+y_psf = refsources[1,*]
+f_psf = refsources[2,*]
+; rebin positions if neessary
+if (rebiter lt 1) then begin
+ x_psf = rebfac * x_psf
+ y_psf = rebfac * y_psf
+ f_psf = rebfac^2 * f_psf
+endif
+nref = n_elements(x_psf)
+xint = round(x_psf)
+yint = round(y_psf)
+
+; open files for output lists
+openw, outfiles1, tmpdir + 'holo_ims.txt', /get_lun
+openw, outfiles2, tmpdir + 'im_masks.txt', /get_lun
+openw, outfiles3, tmpdir + 'weights.txt', /get_lun
+
+
+nexp = fltarr(nax1,nax2) ; records number of exposures per pixel
+;fov_cube = fltarr(nax1,nax2,ncubes)
+numer = complexarr(nax1,nax2)
+denom = complexarr(nax1,nax2)
+errdenom = complexarr(nax1,nax2)
+numer_jack = complexarr(nax1,nax2,nsub)
+denom_jack = complexarr(nax1,nax2,nsub)
+errdenom_jack = complexarr(nax1,nax2,nsub)
+finumer = complexarr(nax1,nax2)
+fidenom = complexarr(nax1,nax2)
+fierrdenom = complexarr(nax1,nax2)
+ngood = 0L
+
+finim = fltarr(nax1,nax2)
+finim_jack = fltarr(nax1,nax2,nsub)
+is_filled = replicate(0,nax1,nax2)
+nexp_old = replicate(0,nax1,nax2)
+
+; Now start lop over all input cubes
+; --------------------------------
+
+for ic = 0, ncubes-1 do begin 
+
+  numer[*,*] = 0
+  denom[*,*] = 0
+  errdenom[*,*] = 0
+
+  ; initialize variables for holography
+  ;---------------------------------------
+
+  expmap = replicate(0,nax1,nax2) ; records number of exposures per pixel
+  nthis = 0L
+
+  cube = readfits(indir + list[ic])
+  mcube = readfits(maskdir + mask_file)
+  sz = size(cube)
+  if (sz[0] gt 2) then  nim = sz[3] else nim = 1
+  print, '&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&'
+  print, 'Read in cube: ' + list[ic]
+  print, 'Read in maskcube: ' + mask_file
+  print, 'Number of frames in this cube: ' + strtrim(string(nim),2)
+  print, '&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&'
+
+
+  ; start loop over frames in this cube
+  ; ----------------------------------
+  for i = 0L, nim-1 do begin
+
+
+  ; read mask
+  ; --------------------------
+    thisfov = mcube[*,*,mask_order[i]]  
+     if (rebfac gt 1) then  thisfov = CREBIN(thisfov,nax1,nax2) ; Do not normalize rebinned FOV!
+     ; next two lines are necessary
+     ; if the mask has previously been shifted by sub-pixels
+     ; or if rebinning has created pixels with values < 1
+     edgpix = where(thisfov ne 1)
+     if edgpix[0] gt -1 then thisfov[edgpix] = 0
+     if SMOOTHMASK gt 0 then begin
+       smoothfov = gauss_smooth(thisfov,smoothmask,/EDGE_TRUNCATE)
+       smoothfov = smoothfov * thisfov
+       thisfov = smoothfov
+       ; repeat smoothing to obtain really
+       ; smooth edges (otherwise there is a jump near the edge)
+       smoothfov = gauss_smooth(thisfov,smoothmask,/EDGE_TRUNCATE)
+       smoothfov = smoothfov * thisfov
+       thisfov = smoothfov
+       smoothfov = gauss_smooth(thisfov,smoothmask,/EDGE_TRUNCATE)
+       smoothfov = smoothfov * thisfov
+       thisfov = smoothfov
+    endif ; (if SMOOTHMASK)
+
+    ; load ith image 
+    im = cube[*,*,mask_order[i]]
+    ; Rebin image 
+    if (rebfac gt 1) then im = CREBIN(im,nax1,nax2,/TOTAL)
+    im = im * thisfov
+    expmap = expmap + thisfov
+
+
+  ; Select reference stars in FoV
+  ; mask some areas
+  ; create delta map of reference stars for
+  ; initial PSF estimation
+  ; --------------------------------------
+
+  ; Valid reference sources
+  ; are those sources that are contained
+  ; in field of view (at least to psf_frac part)
+  valid_ref = replicate(1,nref)
+  sub_arrays, thisfov, xint, yint, boxsize, psffovs, masks
+  for iref = 0, nref-1 do begin
+    tmpmask = masks[*,*,iref]*psffovs[*,*,iref]
+    dummy = circ_mask(tmpmask,boxhw,boxhw,maskrad)
+    if total(dummy) lt round(psf_frac*npix_ref) then begin
+      valid_ref[iref] = 0
+    endif
+  endfor
+  acceptref = where(valid_ref gt 0, nref_accept,complement=reject)
+
+  if (nref_accept gt 0) and (nim ge nsub) then begin
+    xint_accept = xint[acceptref]
+    yint_accept = yint[acceptref]
+    x_psf_accept = x_psf[acceptref]
+    y_psf_accept = y_psf[acceptref]
+    f_psf_accept = f_psf[acceptref]
+    xint_reject = xint[reject]
+    yint_reject = yint[reject]
+
+    if KEYWORD_SET(n_ref_max) and (n_ref_max lt nref_accept) then begin
+     xint_accept = xint_accept[0:n_ref_max-1]
+     yint_accept = yint_accept[0:n_ref_max-1]
+     x_psf_accept = x_psf_accept[0:n_ref_max-1]
+     y_psf_accept = y_psf_accept[0:n_ref_max-1]
+     f_psf_accept = f_psf_accept[0:n_ref_max-1]
+     nref_accept = n_ref_max
+    endif
+    print, 'Using: ' + strn(nref_accept) + ' reference stars. '
+
+ 
+    if keyword_set(psfout) then psfs = fltarr(nax1,nax2,nim)
+    ngpsf = 0L
+ 
+  ; PSF extraction
+  ; ################
+     psfim = im
+
+     ; First PSF extraction
+     ; Will be unweighted.
+     ; ------------------
+
+     sub_arrays, psfim, xint_accept, yint_accept, boxsize, stack, masks
+     sub_arrays, thisfov, xint_accept, yint_accept, boxsize, psfmasks, masks
+     masks = masks * psfmasks
+
+     for iref = 0, nref_accept-1 do begin
+      subim = stack[*,*,iref]
+      submask = masks[*,*,iref]
+      sky_pixels = subim[bgind]
+      sky_mask = submask[bgind]
+      sky_good = where(sky_mask gt 0)
+      bg_level = median(sky_pixels[sky_good])
+      normim = subim - bg_level
+      if (subpix gt 0) then begin
+       subim = image_shift(subim,xint_accept[iref]-x_psf_accept[iref],yint_accept[iref]-y_psf_accept[iref])
+      endif
+      if min(normim lt 0) then normim[where(normim lt 0)] = 0
+      normim = circ_mask(normim, boxhw, boxhw, normrad)
+      subim = subim/total(normim)
+      stack[*,*,iref] = subim
+     endfor
+     psf = stack_median(stack, MASK=masks)
+     if (debug gt 0) then writefits, tmpdir + 'psf_0raw.fits', psf
+
+     psf_sigma = psf
+     RESISTANT_Mean,psf[bgind],3.0,mean_psf,sigma_psf,Num_Rej
+     noise = sigma_psf * sqrt(n_bgind - Num_Rej)
+     psf = psf - mean_psf- nsigma[0] * noise
+     suppress = where(psf lt 0, count)        
+     if (count gt 0) then psf[suppress] = 0
+     psfcen = centroid(circ_mask(psf,boxhw,boxhw,maskrad))
+     psf = circ_mask(psf,psfcen[0],psfcen[1],maskrad)
+;     psf = circ_mask(psf,boxhw,boxhw,maskrad)
+     psf = psf/total(psf)
+     ; compute PSF FWHM for later use
+     psf_fwhm = round(fwhm(psf))
+     psf_sigma[*,*] = noise
+     contrast = max(psf)/max(psf_sigma)
+     print, 'PSF contrast: '+ strn(contrast)
+
+     if (debug gt 0) then begin
+       writefits, tmpdir + 'im.fits', im
+       writefits, tmpdir + 'thisfov.fits', thisfov
+       writefits, tmpdir + 'stack0.fits', stack
+       writefits, tmpdir + 'bgring_0.fits', psf*bgring
+       writefits, tmpdir + 'psf_0.fits', psf
+    endif
+  
+  ; improval of PSF with known sources
+  ; ####################################
+
+ 
+     psf_weights = intarr(nref_accept) ; for optional weighting
+
+    ; iterative improval of PSF
+     for it = 0, iter-1 do begin
+
+       ; clean surroundings of reference stars from secondary sources
+       ; ------------------------------------------------------------
+      stack = fltarr(boxsize,boxsize,nref_accept)
+      psfmasks = fltarr(boxsize,boxsize,nref_accept)
+
+     ; Estimate and subtract diffuse background
+     ; ----------------------------------------
+
+      model = image_model(xx,yy,ff,nax1,nax2,psf,REFERENCE_PIX=[boxhw,boxhw],FTOL=1.D-2)
+      model = model * thisfov
+      P = [1.,0.,0.]
+      W = model
+      gt0 = where(thisfov gt 0,complement=lt0)
+;      W[gt0] = sqrt(W[gt0])
+      W[gt0] = 1.0
+      W[lt0] = 0
+      res = mpcurvefit(model,im,W,P,sigma,FUNCTION_NAME='CALEVAL',/NODERIVATIVE,/QUIET)
+;      print, 'Model fitting parameters for overall image: ' + strn(P)
+      im_model = image_shift(model*P[0],P[1],P[2])
+      diffuse = im - im_model
+      if estim_bg then begin
+         background = estimate_background(diffuse, maskrad, CUBIC=-0.5)
+         ; estimate overall sky (if this frame has an offset)
+          mmm, background, skymod, skysig, skyskew, /SILENT       
+       endif else begin
+          valid = where(thisfov gt 0,complement=invalid)
+          mmm, im[valid], skymod, skysig, skyskew, /SILENT        
+          background = im
+          background[valid] = skymod
+          background[invalid] = 0
+          print, 'Sky level: ' + strn(skymod)
+      endelse
+      im_noise = abs(im - im_model - background)
+      
+      if (debug gt 0) then begin
+         print, P
+         writefits, tmpdir + 'noise.fits', im_noise
+        writefits, tmpdir + 'model.fits', im_model
+        writefits, tmpdir + 'W.fits', W
+      endif
+
+      ; use psfmasks if a reference star may not be contained in all
+      ; cubes because of dithering
+      ; ---------------------------
+
+      for iref = 0, nref_accept - 1 do begin
+       sub_arrays, background, xint_accept[iref], yint_accept[iref], boxsize, thisbg, masks
+       sub_arrays, im, xint_accept[iref], yint_accept[iref], boxsize, slice, masks
+       if debug then writefits, tmpdir + 'slice_raw.fits', slice
+;       slice = slice - thisbg
+       sub_arrays, thisfov, xint_accept[iref], yint_accept[iref], boxsize, maskslice, masks
+       psfmasks[*,*,iref] = maskslice * masks
+       distances = sqrt((xx-x_psf_accept[iref])^2 + (yy-y_psf_accept[iref])^2)
+       nearby = where((distances lt sqrt(2.)*boxsize/2.) and (distances gt psf_fwhm)) ; last condition to avoid subtraction of spurious stars close to reference star
+       if (nearby[0] gt -1) then begin
+         x_near = xx[nearby] - (xint_accept[iref] - boxhw)
+         y_near = yy[nearby] - (yint_accept[iref] - boxhw)
+         f_near = ff[nearby]
+         ; sort by decreasing flux
+         ; needed for latter residual masking of brightest stars
+         ord = reverse(sort(f_near))
+         x_near = x_near[ord]
+         y_near = y_near[ord]
+         f_near = f_near[ord]
+         compare_lists, x_near, y_near, x_psf_accept[iref]-(xint_accept[iref]-boxhw), y_psf_accept[iref]-(yint_accept[iref]-boxhw), x1c, y1c, x2c ,y2c, SUB1=other_stars, MAX_DISTANCE=dmax 
+         if (other_stars[0] gt -1) then begin
+           secondaries = image_model(x_near[other_stars],y_near[other_stars],f_near[other_stars],boxsize,boxsize,psf,REFERENCE_PIX=[boxhw,boxhw])
+          
+           slice = slice - (thisbg + image_shift(secondaries*P[0],P[1],P[2]))
+;         print, 'P[0]: ' + strn(P[0])
+         ; subtraction of secondary sources will not be perfect
+         ; to further suppress there influence
+         ; mask small circular regions centred on the secondaries
+         ; mask only the remnants of the brightest secondaries
+         ; otherwise this becomes a problem in crowded fields
+         if (n_mask_secondary gt 0) then begin
+           n_mask = min([n_elements(other_stars),n_mask_secondary])
+            ; The PSF will generally not be centered on the center of 
+            ; array. Therefore we have to do some acrobatics here.
+           psfmax = max(psf,max_sub)
+           xymax = array_indices(psf,max_sub)
+           psf_mask = circ_mask(psf,xymax[0],xymax[1],round(psf_FWHM/2.))
+           x_mask = round((x_near[other_stars[0:n_mask-1]]))
+           y_mask = round((y_near[other_stars[0:n_mask-1]]))
+           f_mask = round((f_near[other_stars[0:n_mask-1]]))  ; just needed for formal reasons
+           mask_secondaries = image_model(x_mask,y_mask,f_mask,boxsize,boxsize,psf_mask,REFERENCE_PIX=[boxhw,boxhw])
+           mask_ind = where(mask_secondaries gt 0, complement=nomask)
+           maskslice = psfmasks[*,*,iref]
+           if (mask_ind[0] gt -1) then maskslice[mask_ind] = 0
+             psfmasks[*,*,iref] = maskslice
+           endif      ;  if (n_mask_secondary gt 0)
+          endif       ;  (other_stars[0] gt -1)
+;          if debug then begin
+;             print, 'Number of nearby stars: ' + strn(n_elements(nearby))
+;             writefits, tmpdir + 'slice.fits', slice
+;             writefits, tmpdir + 'secondaries.fits',  image_shift(secondaries*P[0],P[1],P[2])
+;             writefits, tmpdir + 'background.fits', thisbg
+;             STOP
+;          endif
+        endif        ;  if (nearby[0] gt -1)
+        stack[*,*,iref] = slice
+     endfor ; end loop over iref
+      
+       if (debug gt 0) then writefits,  tmpdir + 'rawstack_1.fits', stack
+       for iref = 0, nref_accept-1 do begin
+         subim = stack[*,*,iref]
+         submask = psfmasks[*,*,iref]
+         if (subpix gt 0) then begin
+          subim = image_shift(subim,xint_accept[iref]-x_psf_accept[iref],yint_accept[iref]-y_psf_accept[iref])
+          submask = image_shift(submask,xint_accept[iref]-x_psf_accept[iref],yint_accept[iref]-y_psf_accept[iref])
+          zeroind = where(submask lt 0.99, complement = ones)
+          if (zeroind[0] gt -1) then begin
+           submask[zeroind] = 0
+           submask[ones] = 1
+          endif  
+         endif
+         saturated = where(subim gt satlev)
+         submask[saturated] = 0
+         normim = subim
+         if min(normim lt 0) then normim[where(normim lt 0)] = 0
+         normim = circ_mask(normim, boxhw, boxhw, normrad)
+        ; normalization will underweight stars with saturated cores
+        ; should be no problem
+         fnorm = total(normim)
+         subim = subim/fnorm * submask
+         psf_weights[iref] = sqrt(fnorm)
+         stack[*,*,iref] = subim
+         psfmasks[*,*,iref] = submask
+       endfor
+       psf_weights = round(psf_weights/min(psf_weights))
+       if (unweighted eq 1) then psf_weights[*] = 1
+       psf = stack_median(stack, WEIGHTS=psf_weights, MASK=psfmasks)
+       psf_sigma = stack_error(stack, MASK=psfmasks)
+
+      ; suppress noisy parts and mask PSF, obtain mean S/N
+      ; ---------------------------------------------------
+      if (debug gt 0) then begin
+       writefits, tmpdir + 'bgring_' +strtrim(string(it+1),2) + '.fits', psf*bgring
+       writefits, tmpdir + 'psf_' +strtrim(string(it+1),2) + 'raw.fits', psf
+ ;      writefits, tmpdir + 'psf_' +strtrim(string(it+1),2) + 'sigma.fits', psf_sigma
+      endif
+;      print, 'Background: ' + string(median(psf[bgind]))
+;      use astrolib robus statistics script
+;      to estimate mean and stddev
+;      this helps to avoid rare problems with individual bright pixels
+       ; sigma filter PSF
+       psf = sigma_filter(psf,3*rebfac,ITERATE=3,N_SIGMA=3)
+       RESISTANT_Mean,psf[bgind],3.0,mean_bg,sigma_bg,Num_Rej
+       noise = sigma_bg * sqrt(n_bgind - Num_Rej)
+       psf = psf - mean_bg - nsigma[it+1] * noise
+       suppress = where(psf  lt 0, complement=accept,count)
+       if (count gt 0) then begin
+          psf[suppress] = 0
+          psf_sigma[suppress] = 0
+       endif
+       psfcen = centroid(circ_mask(psf,boxhw,boxhw,maskrad))
+       psf = circ_mask(psf,psfcen[0],psfcen[1],maskrad)
+       psfnorm = total(psf)
+       psf = psf/psfnorm
+       psf_sigma = circ_mask(psf_sigma,boxhw,boxhw,maskrad)
+       psf_sigma = psf_sigma/psfnorm
+       contrast = max(psf)/max(psf_sigma)
+       print, 'PSF contrast: '+ strn(contrast)
+       if (debug gt 0) then begin
+        writefits, tmpdir + 'stack.fits', stack*psfmasks
+        writefits, tmpdir + 'stackmasks.fits', psfmasks
+        writefits, tmpdir + 'psf_' +strtrim(string(it+1),2) + '.fits', psf
+        writefits, tmpdir + 'psf_' +strtrim(string(it+1),2) + '_sigma.fits', psf_sigma
+       endif
+    endfor                      ; end loop over iter
+      
+     ; adapt PSF to size of input frame
+     ; shift it to the center (only integer shift!)
+     temp = fltarr(nax1,nax2)
+     temp[0:boxsize-1,0:boxsize-1] = psf
+     psf = shift(temp,cen1-boxhw,cen2-boxhw)
+     temp = fltarr(nax1,nax2)
+     temp[0:boxsize-1,0:boxsize-1] = psf_sigma
+     psf_sigma = shift(temp,cen1-boxhw,cen2-boxhw)
+ 
+; holography algorithm
+  ; #####################
+
+     ind = where(psf gt 0.0, count)
+
+;      if (count gt 0)  then begin
+      if (count gt 0) and (contrast gt contrast_thresh)  then begin
+         
+        if (correct_sky gt 0) then begin
+         im = im - background  ; subtract sky
+        endif        
+        
+        G = FFT(im)
+        H = FFT(psf)*(nax1*nax2)
+        DHPSF =  wien_weight * FFT(psf_sigma)*(nax1*nax2) ; for Wiener filter
+
+        HQ = CONJ(H)
+        HABS = ABS(H)
+        H2 = HABS^2
+        DH2 = ABS(DHPSF)^2
+        GHQ = G*HQ
+
+        if keyword_set(psfout) then psfs[*,*,ngpsf] = psf
+        ngpsf++
+
+        nexp = nexp + thisfov
+
+        numer = numer + GHQ
+        denom = denom + H2
+        errdenom = errdenom + DH2
+        nthis = nthis + 1
+
+        ; create jackknife samples
+        for i_j = 0, nsub-1 do begin
+          skip = (i mod nsub) ; "i" is subscript of curent frame in current cube
+;          print, 'cube, frame, skip, i_j: '
+;          print, strn(ic) + ', ' + strn(i) + ', ' + strn(skip) + ', ' + strn(i_j)
+          if (i_j ne skip) then begin ; and (i lt nsub) then begin
+            numer_jack[*,*,i_j] = numer_jack[*,*,i_j] + GHQ
+            denom_jack[*,*,i_j] = denom_jack[*,*,i_j] + H2
+            errdenom_jack[*,*,i_j] = errdenom_jack[*,*,i_j] + DH2
+          endif; else print, 'Skipped ' + strn(i)
+        endfor
+         
+        finumer = finumer + GHQ
+        fidenom = fidenom + H2
+        fierrdenom = fierrdenom + DH2
+        ngood++
+
+
+       if (debug gt 0) then begin
+          hhh = REAL_PART(FFT(OTF*(GHQ/sqrt(H2)), /INVERSE))
+          rcim = shift(hhh, center+1)
+          writefits, tmpdir + 'rcim.fits', rcim
+        endif
+  
+        print, "Frame: " + string(i+1)
+        print, "Frame number: " + string(mask_order[i]) + " ok"
+
+       endif else begin
+         print, "Frame number: " + string(mask_order[i]) + " low S/N PSF."; 
+       endelse   ; if (count gt 1.0)
+
+
+    ; output of control data
+    ; ----------------------
+
+    if ((nthis mod out_iter) eq 0 and nthis gt 0) then begin
+     hhh = REAL_PART(FFT(OTF*(numer/sqrt(denom)), /INVERSE))
+     rcim = shift(hhh, center+1)
+     writefits, tmpdir + 'rcim_tmp.fits', rcim
+   endif
+
+    if (debug gt 0) then STOP
+
+;    endif else begin ;   if (nref_accept gt 0) and (nim ge nsub) then begin
+    endif else begin ;   if (nref_accept gt 0) 
+       print, '--------------' 
+       print, '***WARNING***' 
+       print, "Cube number: " + string(ic+1) + " no reference stars detected or "
+       print, 'Too few frames in this cube:. There are ' + strn(nim) + ' frames, but'
+       print, strn(nsub) + ' are required for jackknife sampling.'
+       print, 'Skipping cube ' + list[ic] + '.'
+       print, "--------------" 
+;       STOP
+    endelse
+
+    endfor                         ; end loop over frames in this cube (nim)
+  
+
+  ; output of PSFs
+  if keyword_set(psfout) then writefits, '../psfs/psfs' + strtrim(string(ic+1),2) + '.fits', psfs[*,*,0:ngpsf-1], /COMPRESS
+
+  ; output of holography image and exposure map for this cube
+  ; Save numerator and denominator for this cube
+  ; Register region to which this cube contributes
+  ; ----------------------------------------------------------
+  hhh = REAL_PART(FFT(OTF*(numer/sqrt(denom)), /INVERSE))
+  rcim = shift(hhh, center+1)
+  writefits, tmpdir + list[ic] + '_holo.fits', rcim, header, /COMPRESS
+  writefits, tmpdir + list[ic] + '_expmap.fits', expmap, /COMPRESS
+  printf, outfiles1, list[ic] + '_holo'
+  printf, outfiles2, list[ic] + '_support'
+  printf, outfiles3, list[ic] + '_expmap'
+
+ ; output of current total holography image and exposure map
+  ; --------------------------------------------------------
+  erode_ax = round(maskrad/2.)
+  erode_struct = replicate(1,erode_ax,erode_ax)
+  hhh = REAL_PART(FFT(OTF*(finumer/sqrt(fidenom)), /INVERSE))
+  rcim = shift(hhh, center+1)
+  fov = nexp
+  valid = where((nexp-nexp_old) gt 0,complement=invalid)
+;  writefits, tmpdir + 'nexp' + strn(ic+1) + '.fits', nexp, /COMPRESS
+  fov[valid] = 1
+  fov[invalid] = 0
+;  writefits, tmpdir + 'fov.fits', fov, /COMPRESS
+  fov = ERODE(fov,erode_struct) ; to avoid edge effects
+  valid = where(fov gt 0,complement=invalid)
+  is_filled[valid] = nexp[valid]
+  fov[valid] = 1
+  fov[invalid] = 0
+  rcim[invalid] = 0
+;  writefits, tmpdir + 'fov_eroded.fits', fov, /COMPRESS
+  finim[valid] = rcim[valid]
+  for i_j = 0, nsub-1 do begin
+    hhh = REAL_PART(FFT(OTF*(numer_jack[*,*,i_j]/sqrt(denom_jack[*,*,i_j])), /INVERSE))
+    rcim = shift(hhh, center+1)
+    rcim[invalid] = 0
+    tmpim = finim_jack[*,*,i_j]
+    tmpim[valid] = rcim[valid]
+    finim_jack[*,*,i_j] = tmpim
+  endfor
+  nexp_old = nexp
+  writefits, tmpdir + 'current_expmap' + strn(ic+1) + '.fits', is_filled, /COMPRESS
+  writefits, tmpdir + 'current' + strn(ic+1) + '.fits', finim, /COMPRESS
+
+endfor ; end loop over input cubes
+
+
+; Write final image and jackknife images to file
+
+writefits, outnam + '_expmap.fits', is_filled, /COMPRES
+writefits, outnam+'.fits', finim, /COMPRESS
+for i_j = 0, nsub -1 do begin
+  writefits,  outnam + '_s' + strn(i_j+1) + '.fits', finim_jack[*,*,i_j], /COMPRESS
+endfor
+
+free_lun, outfiles1, outfiles2, outfiles3
+
+END
+ 
