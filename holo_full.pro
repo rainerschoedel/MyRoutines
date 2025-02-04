@@ -599,7 +599,7 @@ errdenom[*,*] = 0
           hhh = REAL_PART(FFT(OTF*(GHQ/(H2+DH2)), /INVERSE))
           rcim = shift(hhh, center+1)
           writefits, tmpdir + 'rcim_wien.fits', rcim
-        endif
+       endif
   
 ;        power = REAL_PART(HABS)
 ;        writefits, tmpdir + 'P2.fits', power
