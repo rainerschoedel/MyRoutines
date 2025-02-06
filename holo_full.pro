@@ -319,7 +319,7 @@ errdenom[*,*] = 0
        writefits, tmpdir + 'im.fits', im
        writefits, tmpdir + 'thisfov.fits', thisfov
        writefits, tmpdir + 'stack0.fits', stack
-       writefits, tmpdir + 'bgring_0.fits', psf*bgring
+       writefits, tmpdir + 'bgring_0.fits', bgring
        writefits, tmpdir + 'psf_0.fits', psf
     endif
   
@@ -559,6 +559,14 @@ errdenom[*,*] = 0
         H2 = HABS^2
         DH2 = ABS(DHPSF)^2
         GHQ = G*HQ
+
+        ; if there are any zeros in H2, fill
+        ; them with the minimum non-zero value
+        bad = where(H2 eq 0,complement=good,n_bad)
+        if (n_bad gt 0) then begin
+          fill_zero = min(H2[good])
+          H2[bad] = fill_zero
+        endif
 
         if keyword_set(psfout) then begin
            psfs[*,*,ngpsf] = psf
