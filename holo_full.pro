@@ -564,10 +564,11 @@ errdenom[*,*] = 0
         ; them with the minimum non-zero value
         bad = where(H2 eq 0,complement=good,n_bad)
         if (n_bad gt 0) then begin
+          writefits, tmpdir + 'H2.fits', H2
           fill_zero = min(H2[good])
           H2[bad] = fill_zero
+          writefits, tmpdir + 'H2_repaired.fits', H2
         endif
-
         if keyword_set(psfout) then begin
            psfs[*,*,ngpsf] = psf
            psf_sigmas[*,*,ngpsf] = psf_sigma
@@ -646,14 +647,14 @@ errdenom[*,*] = 0
 ;  writefits, tmpdir + 'nexp' + strn(i+1) + '.fits', nexp, /COMPRESS
   fov[valid] = 1
   fov[invalid] = 0
-  writefits, tmpdir + 'fov.fits', fov, /COMPRESS
+;  writefits, tmpdir + 'fov.fits', fov, /COMPRESS
   fov = ERODE(fov,erode_struct) ; to avoid edge effects
   valid = where(fov gt 0,complement=invalid)
   is_filled[valid] = nexp[valid]
   fov[valid] = 1
   fov[invalid] = 0
   rcim[invalid] = 0
-  writefits, tmpdir + 'fov_eroded.fits', fov, /COMPRESS
+;  writefits, tmpdir + 'fov_eroded.fits', fov, /COMPRESS
   finim[valid] = rcim[valid]
   for i_j = 0, nsub-1 do begin
     hhh = REAL_PART(FFT(OTF*(numer_jack[*,*,i_j]/(denom_jack[*,*,i_j]+errdenom_jack[*,*,i_j])), /INVERSE))
@@ -672,8 +673,8 @@ errdenom[*,*] = 0
   ; output of control data
   ; ----------------------
   if ((nthis mod out_iter) eq 0 and nthis gt 0) then begin
-    writefits, tmpdir + 'current_expmap' + strn(i+1) + '.fits', is_filled, /COMPRESS
-    writefits, tmpdir + 'current' + strn(i+1) + '.fits', finim, /COMPRESS
+    writefits, tmpdir + 'current_expmap' + strn(nthis) + '.fits', is_filled, /COMPRESS
+    writefits, tmpdir + 'current' + strn(nthis) + '.fits', finim, /COMPRESS
   endif
 
 ;STOP
