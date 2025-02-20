@@ -698,6 +698,8 @@ for i_j = 0, nsub -1 do begin
   writefits, outnam + '_s' + strn(i_j+1) +'_psf.fits', psf_jack, /COMPRESS
 endfor
 
+print, 'Finished holography. Used ' + strn(ngood) + ' frames.'
+
 free_lun, outfiles1, outfiles2, outfiles3
 
 END
